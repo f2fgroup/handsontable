@@ -12,6 +12,27 @@ import ViewportColumnsCalculator from './calculator/viewportColumns';
 import ViewportRowsCalculator from './calculator/viewportRows';
 
 /**
+ * Initial value
+ */
+let docWidth = document.documentElement.offsetWidth;
+/**
+ * Pending timer
+ */
+let reqWidth = null;
+/**
+ * Optimized timer
+ */
+const getDocWidth = function getDocWidth() {
+  if (reqWidth) clearTimeout(reqWidth);
+  reqWidth = setTimeout(function() {
+    reqWidth = null;
+    docWidth = document.documentElement.offsetWidth;
+  }, 50);
+  return docWidth;
+};
+
+
+/**
  * @class Viewport
  */
 class Viewport {
@@ -64,7 +85,7 @@ class Viewport {
     let trimmingContainer = this.instance.wtOverlays.leftOverlay.trimmingContainer;
     let overflow;
     let stretchSetting = this.wot.getSetting('stretchH');
-    let docOffsetWidth = document.documentElement.offsetWidth;
+    let docOffsetWidth = getDocWidth();
     let preventOverflow = this.wot.getSetting('preventOverflow');
 
     if (preventOverflow) {

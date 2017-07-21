@@ -11,6 +11,191 @@ import Overlay from './overlay/_base';
 let performanceWarningAppeared = false;
 
 /**
+ * Timer to avoid multiple call (performance improvements)
+ */
+let waitTableRender = null;
+/**
+ * List of requested rows
+ */
+let mapTableRender = new WeakMap();
+let stackTableRender = [];
+
+/**
+ * Rendering a row
+ */
+const fnTableRender = function() {
+  if (!this.wtTable.isWorkingOnClone()) {
+    const skipRender = {};
+    this.wot.getSetting('beforeDraw', true, skipRender);
+
+    if (skipRender.skipRender === true) {
+      return;
+    }
+  }
+  console.time('render');
+
+  this.rowHeaders = this.wot.getSetting('rowHeaders');
+  this.rowHeaderCount = this.rowHeaders.length;
+  this.fixedRowsTop = this.wot.getSetting('fixedRowsTop');
+  this.fixedRowsBottom = this.wot.getSetting('fixedRowsBottom');
+  this.columnHeaders = this.wot.getSetting('columnHeaders');
+  this.columnHeaderCount = this.columnHeaders.length;
+
+  let columnsToRender = this.wtTable.getRenderedColumnsCount();
+  let rowsToRender = this.wtTable.getRenderedRowsCount();
+  let totalColumns = this.wot.getSetting('totalColumns');
+  let totalRows = this.wot.getSetting('totalRows');
+  let workspaceWidth;
+  let adjusted = false;
+
+  if (Overlay.isOverlayTypeOf(this.wot.cloneOverlay, Overlay.CLONE_BOTTOM) ||
+      Overlay.isOverlayTypeOf(this.wot.cloneOverlay, Overlay.CLONE_BOTTOM_LEFT_CORNER)) {
+
+    // do NOT render headers on the bottom or bottom-left corner overlay
+    this.columnHeaders = [];
+    this.columnHeaderCount = 0;
+  }
+
+  if (totalColumns >= 0) {
+    // prepare COL and TH elements for rendering
+    this.adjustAvailableNodes();
+    adjusted = true;
+
+    // adjust column widths according to user widths settings
+    this.renderColumnHeaders();
+
+    // Render table rows
+    this.renderRows(totalRows, rowsToRender, columnsToRender);
+
+    if (!this.wtTable.isWorkingOnClone()) {
+      workspaceWidth = this.wot.wtViewport.getWorkspaceWidth();
+      this.wot.wtViewport.containerWidth = null;
+    }
+
+    this.adjustColumnWidths(columnsToRender);
+    this.markOversizedColumnHeaders();
+    this.adjustColumnHeaderHeights();
+  }
+
+  if (!adjusted) {
+    this.adjustAvailableNodes();
+  }
+  this.removeRedundantRows(rowsToRender);
+
+  if (!this.wtTable.isWorkingOnClone() || this.wot.isOverlayName(Overlay.CLONE_BOTTOM)) {
+    this.markOversizedRows();
+  }
+  if (!this.wtTable.isWorkingOnClone()) {
+    this.wot.wtViewport.createVisibleCalculators();
+    this.wot.wtOverlays.refresh(false);
+    this.wot.wtOverlays.applyToDOM();
+
+    let hiderWidth = outerWidth(this.wtTable.hider);
+    let tableWidth = outerWidth(this.wtTable.TABLE);
+
+    if (hiderWidth !== 0 && (tableWidth !== hiderWidth)) {
+      // Recalculate the column widths, if width changes made in the overlays removed the scrollbar, thus changing the viewport width.
+      this.adjustColumnWidths(columnsToRender);
+    }
+
+    if (workspaceWidth !== this.wot.wtViewport.getWorkspaceWidth()) {
+      // workspace width changed though to shown/hidden vertical scrollbar. Let's reapply stretching
+      this.wot.wtViewport.containerWidth = null;
+
+      let firstRendered = this.wtTable.getFirstRenderedColumn();
+      let lastRendered = this.wtTable.getLastRenderedColumn();
+      let defaultColumnWidth = this.wot.getSetting('defaultColumnWidth');
+      let rowHeaderWidthSetting = this.wot.getSetting('rowHeaderWidth');
+
+      rowHeaderWidthSetting = this.instance.getSetting('onModifyRowHeaderWidth', rowHeaderWidthSetting);
+
+      if (rowHeaderWidthSetting != null) {
+        for (let i = 0; i < this.rowHeaderCount; i++) {
+          let width = Array.isArray(rowHeaderWidthSetting) ? rowHeaderWidthSetting[i] : rowHeaderWidthSetting;
+
+          width = width == null ? defaultColumnWidth : width;
+
+          this.COLGROUP.childNodes[i].style.width = `${width}px`;
+        }
+      }
+
+      for (let i = firstRendered; i < lastRendered; i++) {
+        let width = this.wtTable.getStretchedColumnWidth(i);
+        let renderedIndex = this.columnFilter.sourceToRendered(i);
+
+        this.COLGROUP.childNodes[renderedIndex + this.rowHeaderCount].style.width = `${width}px`;
+      }
+    }
+
+    this.wot.getSetting('onDraw', true);
+
+  } else if (this.wot.isOverlayName(Overlay.CLONE_BOTTOM)) {
+    this.wot.cloneSource.wtOverlays.adjustElementsSize();
+  }
+  console.timeEnd('render');
+};
+
+/**
+ * Enable direct processing mode (used by processTableRender)
+ */
+var forceTableRender = false;
+
+/**
+ * Processing rendering
+ */
+const processTableRender = function processTableRender() {
+  if (stackTableRender.length == 0) return;
+  forceTableRender = true;
+  // ordered run of each pending request
+  stackTableRender.forEach(function(obj) {
+    let relObj = mapTableRender.get(obj.wtTable);
+    if (relObj) {
+      setImmediate(fnTableRender.bind(relObj));
+      mapTableRender.set(obj.wtTable, null);
+    }
+  });
+  if (stackTableRender[0].wot.wtOverlays) {
+    console.log('--> Refresh All');
+    setImmediate(stackTableRender[0].wot.wtOverlays.refreshAll.bind(
+      stackTableRender[0].wot.wtOverlays
+    ));
+  }
+  forceTableRender = false;
+  mapTableRender = new WeakMap();
+  stackTableRender = [];
+  if (waitTableRender) clearTimeout(waitTableRender);
+  waitTableRender = null;
+};
+
+/**
+ * Manage async optimized requests
+ */
+const requestTableRender = function(obj) {
+  if (forceTableRender) {
+    mapTableRender.set(obj.wtTable, null);
+    return fnTableRender.apply(obj, []);
+  }
+  // force refresh if the system required it
+  if (!obj.wot.wtViewport.rowsVisibleCalculator) {
+    obj.wot.wtViewport.createVisibleCalculators();
+  }
+  // reads informations
+  var wot = mapTableRender.get(obj.wtTable);
+  if (waitTableRender && !wot) {
+    console.log('Reset timer');
+    clearTimeout(waitTableRender);
+  }
+  // register the pending change
+  if (!wot) {
+    stackTableRender.push(obj);
+  }
+  mapTableRender.set(obj.wtTable, obj);
+  // wait max 500ms before refresh
+  waitTableRender = setTimeout(processTableRender, 500);
+};
+
+
+/**
  * @class TableRenderer
  */
 class TableRenderer {
@@ -44,114 +229,7 @@ class TableRenderer {
    *
    */
   render() {
-    if (!this.wtTable.isWorkingOnClone()) {
-      const skipRender = {};
-      this.wot.getSetting('beforeDraw', true, skipRender);
-
-      if (skipRender.skipRender === true) {
-        return;
-      }
-    }
-
-    this.rowHeaders = this.wot.getSetting('rowHeaders');
-    this.rowHeaderCount = this.rowHeaders.length;
-    this.fixedRowsTop = this.wot.getSetting('fixedRowsTop');
-    this.fixedRowsBottom = this.wot.getSetting('fixedRowsBottom');
-    this.columnHeaders = this.wot.getSetting('columnHeaders');
-    this.columnHeaderCount = this.columnHeaders.length;
-
-    let columnsToRender = this.wtTable.getRenderedColumnsCount();
-    let rowsToRender = this.wtTable.getRenderedRowsCount();
-    let totalColumns = this.wot.getSetting('totalColumns');
-    let totalRows = this.wot.getSetting('totalRows');
-    let workspaceWidth;
-    let adjusted = false;
-
-    if (Overlay.isOverlayTypeOf(this.wot.cloneOverlay, Overlay.CLONE_BOTTOM) ||
-        Overlay.isOverlayTypeOf(this.wot.cloneOverlay, Overlay.CLONE_BOTTOM_LEFT_CORNER)) {
-
-      // do NOT render headers on the bottom or bottom-left corner overlay
-      this.columnHeaders = [];
-      this.columnHeaderCount = 0;
-    }
-
-    if (totalColumns >= 0) {
-      // prepare COL and TH elements for rendering
-      this.adjustAvailableNodes();
-      adjusted = true;
-
-      // adjust column widths according to user widths settings
-      this.renderColumnHeaders();
-
-      // Render table rows
-      this.renderRows(totalRows, rowsToRender, columnsToRender);
-
-      if (!this.wtTable.isWorkingOnClone()) {
-        workspaceWidth = this.wot.wtViewport.getWorkspaceWidth();
-        this.wot.wtViewport.containerWidth = null;
-      }
-
-      this.adjustColumnWidths(columnsToRender);
-      this.markOversizedColumnHeaders();
-      this.adjustColumnHeaderHeights();
-    }
-
-    if (!adjusted) {
-      this.adjustAvailableNodes();
-    }
-    this.removeRedundantRows(rowsToRender);
-
-    if (!this.wtTable.isWorkingOnClone() || this.wot.isOverlayName(Overlay.CLONE_BOTTOM)) {
-      this.markOversizedRows();
-    }
-    if (!this.wtTable.isWorkingOnClone()) {
-      this.wot.wtViewport.createVisibleCalculators();
-      this.wot.wtOverlays.refresh(false);
-
-      this.wot.wtOverlays.applyToDOM();
-
-      let hiderWidth = outerWidth(this.wtTable.hider);
-      let tableWidth = outerWidth(this.wtTable.TABLE);
-
-      if (hiderWidth !== 0 && (tableWidth !== hiderWidth)) {
-        // Recalculate the column widths, if width changes made in the overlays removed the scrollbar, thus changing the viewport width.
-        this.adjustColumnWidths(columnsToRender);
-      }
-
-      if (workspaceWidth !== this.wot.wtViewport.getWorkspaceWidth()) {
-        // workspace width changed though to shown/hidden vertical scrollbar. Let's reapply stretching
-        this.wot.wtViewport.containerWidth = null;
-
-        let firstRendered = this.wtTable.getFirstRenderedColumn();
-        let lastRendered = this.wtTable.getLastRenderedColumn();
-        let defaultColumnWidth = this.wot.getSetting('defaultColumnWidth');
-        let rowHeaderWidthSetting = this.wot.getSetting('rowHeaderWidth');
-
-        rowHeaderWidthSetting = this.instance.getSetting('onModifyRowHeaderWidth', rowHeaderWidthSetting);
-
-        if (rowHeaderWidthSetting != null) {
-          for (let i = 0; i < this.rowHeaderCount; i++) {
-            let width = Array.isArray(rowHeaderWidthSetting) ? rowHeaderWidthSetting[i] : rowHeaderWidthSetting;
-
-            width = width == null ? defaultColumnWidth : width;
-
-            this.COLGROUP.childNodes[i].style.width = `${width}px`;
-          }
-        }
-
-        for (let i = firstRendered; i < lastRendered; i++) {
-          let width = this.wtTable.getStretchedColumnWidth(i);
-          let renderedIndex = this.columnFilter.sourceToRendered(i);
-
-          this.COLGROUP.childNodes[renderedIndex + this.rowHeaderCount].style.width = `${width}px`;
-        }
-      }
-
-      this.wot.getSetting('onDraw', true);
-
-    } else if (this.wot.isOverlayName(Overlay.CLONE_BOTTOM)) {
-      this.wot.cloneSource.wtOverlays.adjustElementsSize();
-    }
+    requestTableRender(this);
   }
 
   /**
