@@ -23,6 +23,7 @@ let reqWidth = null;
  * Optimized timer
  */
 const getDocWidth = function getDocWidth() {
+  return document.documentElement.offsetWidth;
   if (reqWidth) clearTimeout(reqWidth);
   reqWidth = setTimeout(function() {
     reqWidth = null;

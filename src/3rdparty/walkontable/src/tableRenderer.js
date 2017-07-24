@@ -229,7 +229,8 @@ class TableRenderer {
    *
    */
   render() {
-    requestTableRender(this);
+    // requestTableRender(this);
+    fnTableRender.apply(this, []);
   }
 
   /**
